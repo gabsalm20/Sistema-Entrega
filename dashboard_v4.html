@@ -405,10 +405,10 @@ tbody td{padding:9px 12px;color:var(--text)}
       <div class="card">
         <div class="card-title" style="margin-bottom:10px">📋 Formato Esperado</div>
         <div style="font-size:10px;color:var(--muted);line-height:1.9">
-          <b style="color:var(--text)">CSV (sep. ;)</b><br>
-          Obra; Local; Modelo; Avaliador; Data; Nota; Grupo do item; Resposta do item<br><br>
-          <b style="color:var(--text)">XLSX</b><br>
-          Obra, Torre, Pavimento, Apartamento, ID_APTO, Modelo, Data, Nota, Grupo do item, Resposta do item<br><br>
+          <b style="color:var(--text)">Formato aceito: BASE 1 (CSV, sep. ;)</b><br>
+          Obra; Local; Modelo; Avaliador; Data; Nota; Grupo do item; Descrição do item; Resposta do item<br><br>
+          <b style="color:var(--accent)">⚙ Conversão automática:</b><br>
+          O sistema transforma BASE 1 → padrão BASE 2 automaticamente. Você nunca importa a BASE 2.<br><br>
           <b style="color:var(--text)">Status reconhecidos:</b><br>
           Conforme → <span style="color:var(--green)">C</span><br>
           Não conforme → <span style="color:var(--red)">NC</span><br>
@@ -942,7 +942,12 @@ async function processFiles(files) {
       else { log(`❌ Formato não suportado: ${file.name}`, 'err'); tE++; continue; }
       if (!rows||!rows.length) { log(`⚠ Sem linhas válidas`, 'warn'); tE++; continue; }
       log(`✅ ${rows.length} linhas lidas`, 'ok');
-      const res = mergeRows(rows, file.name);
+      if (!isBase1Format(rows)) {
+        log(`⚠ Arquivo não reconhecido como BASE 1 (sem coluna "Local"). Ignorado.`, 'warn');
+        tE++; continue;
+      }
+      log(`🔄 Convertendo BASE 1 → padrão BASE 2...`, 'info');
+      const res = transformarArquivosBase1EmBase2Padrao(rows, file.name);
       log(`📊 Novos: ${res.novos} · Atualizados: ${res.atu} · Duplicatas: ${res.dup}`, res.novos+res.atu>0?'ok':'warn');
       tN+=res.novos; tA+=res.atu; tD+=res.dup;
     } catch(e) { log(`❌ Erro: ${e.message}`, 'err'); tE++; }
@@ -962,15 +967,21 @@ async function processFiles(files) {
   renderDBInfo();
 }
 
+// ══════════════════════════════════════════════════════════
+//  BASE 1 → BASE 2  TRANSFORMATION ENGINE
+//  Usuário importa SOMENTE BASE 1.
+//  Sistema converte automaticamente para padrão BASE 2.
+// ══════════════════════════════════════════════════════════
+
 function parseCSV(text) {
-  const lines = text.split(/\r?\n/).filter(l=>l.trim());
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
   if (lines.length < 2) return [];
   const sep = lines[0].includes(';') ? ';' : ',';
-  const hdrs = lines[0].split(sep).map(h=>h.replace(/^"|"$/g,'').trim());
+  const hdrs = lines[0].split(sep).map(h => h.replace(/^"|"$/g,'').trim());
   return lines.slice(1).map(l => {
-    const vals = l.split(sep).map(v=>v.replace(/^"|"$/g,'').trim());
-    const o = {}; hdrs.forEach((h,i)=>o[h]=vals[i]||''); return o;
-  }).filter(o=>o['Obra']||o['Local']);
+    const vals = l.split(sep).map(v => v.replace(/^"|"$/g,'').trim());
+    const o = {}; hdrs.forEach((h,i) => o[h] = vals[i]||''); return o;
+  }).filter(o => o['Obra'] || o['Local']);
 }
 
 function parseXLSX(buf) {
@@ -978,77 +989,129 @@ function parseXLSX(buf) {
   return XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {defval:''});
 }
 
-function normRow(row) {
+// Detecta se arquivo é BASE 1 (coluna Local) — único formato aceito
+function isBase1Format(rows) {
+  if (!rows || !rows.length) return false;
+  return 'Local' in rows[0];
+}
+
+// Converte uma linha da BASE 1 para estrutura BASE 2
+function converterLinhaBase1ParaBase2(row) {
   const obra = (row['Obra']||'').toString().trim();
-  let torre='', pav='', apto='';
-  if (row['Torre']) {
-    torre = row['Torre'].toString().trim();
-    pav   = row['Pavimento'].toString().trim();
-    apto  = row['Apartamento'].toString().trim();
-  } else if (row['Local']) {
-    const loc = (row['Local']||'').toString().trim();
-    const m = loc.match(/Torre\s*(\S+)\s*-\s*Pavimento\s*(.+?)\s*-\s*Apartamento\s*(.+)$/);
-    if (m) { torre=`Torre ${m[1].trim()}`; pav=`Pavimento ${m[2].trim()}`; apto=`Apartamento ${m[3].trim()}`; }
-  }
+  const local = (row['Local']||'').toString().trim();
+  const m = local.match(/Torre\s*(\S+)\s*-\s*Pavimento\s*(.+?)\s*-\s*Apartamento\s*(.+)$/);
+  const torre       = m ? 'Torre '       + m[1].trim() : '';
+  const pavimento   = m ? 'Pavimento '   + m[2].trim() : '';
+  const apartamento = m ? 'Apartamento ' + m[3].trim() : '';
+  const id_apto     = obra + ' - ' + torre + ' - ' + pavimento + ' - ' + apartamento;
+  const dataStr     = (row['Data']||'').toString().trim();
+  const dataParsed  = parseDate(dataStr);
+  const nota        = parseFloat(row['Nota'])||null;
   return {
-    obra, torre, pav, apto,
-    id: obra+' - '+torre+' - '+pav+' - '+apto,
-    nota: parseFloat(row['Nota']||0)||null,
-    resp: (row['Resposta do item']||'').toString().trim(),
-    grupo: (row['Grupo do item']||'').toString().trim(),
-    dataStr: (row['Data']||row['Data1']||'').toString().trim(),
-    cl: shortModelo(row['Modelo']||'')
+    Obra: obra, Torre: torre, Pavimento: pavimento,
+    Apartamento: apartamento, ID_APTO: id_apto,
+    Modelo: (row['Modelo']||'').toString().trim(),
+    Data: dataParsed, Data1: dataParsed.substring(0,10),
+    Nota: nota,
+    'Grupo do item':      (row['Grupo do item']||'').toString().trim(),
+    'Descricao do item':  (row['Descrição do item']||'').toString().trim(),
+    'Resposta do item':   (row['Resposta do item']||'').toString().trim(),
+    'Observacoes do item':(row['Observações do item']||'').toString().trim(),
+    Status_Apto: '', Flag_NC: 0, Status_Apto_Final: null
   };
 }
 
-function mergeRows(rows, fonte) {
+// Calcula Status_Apto por apartamento — mesma regra da BASE 2
+function calcularStatusApto(linhasDoApto) {
+  const resps = linhasDoApto.map(r => (r['Resposta do item']||'').trim().toLowerCase());
+  if (resps.includes('não conforme')) return 'NC';
+  if (resps.includes('conforme após reinspeção') || resps.includes('conforme após correção')) return 'CREINSP';
+  return 'C';
+}
+
+// ── FUNÇÃO PRINCIPAL OBRIGATÓRIA ──
+// Recebe linhas brutas da BASE 1 → converte → consolida → atualiza DB
+function transformarArquivosBase1EmBase2Padrao(todasLinhasBase1, nomeFonte) {
+
+  // PASSO 1 — Converter cada linha para estrutura BASE 2
+  const linhasConvertidas = todasLinhasBase1
+    .map(row => converterLinhaBase1ParaBase2(row))
+    .filter(r => r.Torre && r.Torre !== 'Torre ');
+
+  if (!linhasConvertidas.length) return {novos:0, atu:0, dup:0};
+
+  // PASSO 2 — Agrupar por (ID_APTO + Checklist)
   const byAptoCl = {};
-  rows.forEach(row => {
-    const n = normRow(row);
-    if (!n.id || !n.torre || n.torre === 'nan') return;
-    const k = n.id + '||' + n.cl;
-    if (!byAptoCl[k]) byAptoCl[k] = {obra:n.obra,torre:n.torre,pav:n.pav,apto:n.apto,cl:n.cl,resps:[],nota:n.nota,dataStr:n.dataStr};
-    byAptoCl[k].resps.push(n.resp);
-    if (n.nota) byAptoCl[k].nota = n.nota;
+  linhasConvertidas.forEach(row => {
+    const cl = shortModelo(row.Modelo);
+    const k  = row.ID_APTO + '||' + cl;
+    if (!byAptoCl[k]) byAptoCl[k] = {
+      obra:row.Obra, torre:row.Torre, pav:row.Pavimento,
+      apto:row.Apartamento, id:row.ID_APTO, cl,
+      linhas:[], nota:row.Nota, dataStr:row.Data
+    };
+    byAptoCl[k].linhas.push(row);
+    if (row.Nota) byAptoCl[k].nota = row.Nota;
+    if ((row.Data||'') > (byAptoCl[k].dataStr||'')) byAptoCl[k].dataStr = row.Data;
   });
 
+  // PASSO 3 — Calcular Status_Apto (regra BASE 2) e montar registro final
   let novos=0, atu=0, dup=0;
-  Object.entries(byAptoCl).forEach(([k, g]) => {
-    const status = calcStatus(g.resps);
-    const dataISO = parseDate(g.dataStr);
-    const nc  = g.resps.filter(r=>r.toLowerCase()==='não conforme').length;
-    const cre = g.resps.filter(r=>['conforme após reinspeção','conforme após correção'].includes(r.toLowerCase())).length;
-    const histEntry = {fonte, Status:status, Data:dataISO, Nota:g.nota, NC:nc};
-    const existing = DB.all_aptos[g.id];
 
+  Object.values(byAptoCl).forEach(g => {
+    const statusApto = calcularStatusApto(g.linhas);
+    const dataISO    = g.dataStr || '';
+    const nc  = g.linhas.filter(r => (r['Resposta do item']||'').trim().toLowerCase() === 'não conforme').length;
+    const cre = g.linhas.filter(r => ['conforme após reinspeção','conforme após correção'].includes((r['Resposta do item']||'').trim().toLowerCase())).length;
+
+    const ncGroups = {};
+    g.linhas
+      .filter(r => (r['Resposta do item']||'').trim().toLowerCase() === 'não conforme')
+      .forEach(r => { const gr = r['Grupo do item']||'Outros'; ncGroups[gr]=(ncGroups[gr]||0)+1; });
+
+    const histEntry = {fonte:nomeFonte, Status:statusApto, Data:dataISO, Nota:g.nota, NC:nc};
+
+    // PASSO 4 — Consolidar: NUNCA sobrescreve histórico anterior
+    const existing = DB.all_aptos[g.id];
     if (!existing) {
       DB.all_aptos[g.id] = {Obra:g.obra, Torre:g.torre, Pavimento:g.pav, Apartamento:g.apto, checklists:{}};
-      DB.all_aptos[g.id].checklists[g.cl] = {Status:status,Nota:g.nota,NC_total:nc,CRE_total:cre,num_inspecoes:1,ultima_data:dataISO,NC_groups:{},historico:[histEntry],evolucao:status};
+      DB.all_aptos[g.id].checklists[g.cl] = {
+        Status:statusApto, Nota:g.nota, NC_total:nc, CRE_total:cre,
+        num_inspecoes:1, ultima_data:dataISO, NC_groups:ncGroups,
+        historico:[histEntry], evolucao:statusApto
+      };
       novos++;
     } else {
       if (!existing.checklists) existing.checklists = {};
       const clData = existing.checklists[g.cl];
       if (!clData) {
-        existing.checklists[g.cl] = {Status:status,Nota:g.nota,NC_total:nc,CRE_total:cre,num_inspecoes:1,ultima_data:dataISO,NC_groups:{},historico:[histEntry],evolucao:status};
+        existing.checklists[g.cl] = {
+          Status:statusApto, Nota:g.nota, NC_total:nc, CRE_total:cre,
+          num_inspecoes:1, ultima_data:dataISO, NC_groups:ncGroups,
+          historico:[histEntry], evolucao:statusApto
+        };
         atu++;
       } else {
-        const alreadyHas = (clData.historico||[]).some(h=>h.fonte===fonte);
-        if (alreadyHas) { dup++; return; }
+        // Verificar duplicata pela fonte
+        if ((clData.historico||[]).some(h => h.fonte === nomeFonte)) { dup++; return; }
+        // Acumular — nunca substituir
         clData.historico = clData.historico||[];
         clData.historico.push(histEntry);
-        clData.historico.sort((a,b)=>(a.Data||'').localeCompare(b.Data||''));
+        clData.historico.sort((a,b) => (a.Data||'').localeCompare(b.Data||''));
         const latest = clData.historico[clData.historico.length-1];
-        clData.Status = latest.Status;
-        clData.Nota = latest.Nota || clData.Nota;
-        clData.ultima_data = latest.Data;
-        clData.NC_total = (clData.NC_total||0) + nc;
-        clData.CRE_total = (clData.CRE_total||0) + cre;
+        clData.Status        = latest.Status;
+        clData.Nota          = latest.Nota || clData.Nota;
+        clData.ultima_data   = latest.Data;
+        clData.NC_total      = (clData.NC_total||0) + nc;
+        clData.CRE_total     = (clData.CRE_total||0) + cre;
         clData.num_inspecoes = clData.historico.length;
-        clData.evolucao = clData.historico.map(h=>h.Status).join(' → ');
+        clData.evolucao      = clData.historico.map(h=>h.Status).join(' -> ');
+        Object.entries(ncGroups).forEach(([g2,c]) => { clData.NC_groups[g2]=(clData.NC_groups[g2]||0)+c; });
         atu++;
       }
     }
   });
+
   return {novos, atu, dup};
 }
 
