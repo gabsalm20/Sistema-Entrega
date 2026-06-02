@@ -1574,37 +1574,58 @@ async function sincronizarManual() {
 }
 
 // ── INIT ──
-renderOverview();
-updateSidebarFooter();
-// Pre-populate torre selects for historico and mapa
-const _torres = [...new Set(Object.values(DB.all_aptos).map(v=>v.Torre).filter(t=>t&&t!=='nan'))].sort();
-['map-torre','h-torre'].forEach(id=>{
-  const sel=document.getElementById(id); if(!sel) return;
-  _torres.forEach(t=>{const o=document.createElement('option');o.value=t;o.textContent=t;sel.appendChild(o);});
-});
 
-// ── INICIALIZAÇÃO ONLINE ──
-if (MODO_ONLINE) {
-  // Carrega dados do Sheets na inicialização
-  carregarDadosOnline().then(function(carregou) {
-    // P11: uma única renderização ao completar carregamento online
-    refresh();
-    updateSidebarFooter();
-    renderDBInfo();
-    // Popular selects de torre
-    const torres = [...new Set(Object.values(DB.all_aptos).map(function(v){return v.Torre;}).filter(function(t){return t&&t!=='nan';}))].sort();
-    ['map-torre','h-torre'].forEach(function(id){
-      const sel=document.getElementById(id); if(!sel) return;
-      while(sel.options.length > 1) sel.remove(1);
-      torres.forEach(function(t){const o=document.createElement('option');o.value=t;o.textContent=t;sel.appendChild(o);});
+// Atualiza selects de torre com os dados do DB atual
+function atualizarSelectsTorres() {
+  const torres = [...new Set(
+    Object.values(DB.all_aptos).map(function(v){ return v.Torre; })
+      .filter(function(t){ return t && t !== 'nan'; })
+  )].sort();
+  ['map-torre','h-torre'].forEach(function(id) {
+    const sel = document.getElementById(id); if (!sel) return;
+    const atual = sel.value;
+    while (sel.options.length > 1) sel.remove(1);
+    torres.forEach(function(t) {
+      const o = document.createElement('option');
+      o.value = t; o.textContent = t;
+      if (t === atual) o.selected = true;
+      sel.appendChild(o);
     });
   });
+}
 
-  // Auto-sincroniza a cada 5 minutos (300000 ms)
-  setInterval(() => {
-    carregarDadosOnline().then(carregou => {
+// Inicialização principal — async para aguardar Sheets antes de renderizar
+async function inicializarDashboard() {
+  if (MODO_ONLINE) {
+    _setOnlineStatus(true, '⟳ Carregando dados online…');
+    const carregou = await carregarDadosOnline();
+    if (carregou) {
+      // carregarDadosOnline já chama rebuildSummaries() e atualizarFiltroObras()
+      atualizarSelectsTorres();
+    } else {
+      console.warn('Nenhum dado carregado do Google Sheets ou resposta vazia.');
+    }
+  }
+  // Renderizar após carregamento (ou imediatamente se offline)
+  refresh();
+  updateSidebarFooter();
+  renderDBInfo();
+  atualizarSelectsTorres();
+  atualizarFiltroObras();
+}
+
+// Disparar após DOM pronto
+document.addEventListener('DOMContentLoaded', inicializarDashboard);
+
+// Auto-sincroniza a cada 5 minutos
+if (MODO_ONLINE) {
+  setInterval(function() {
+    carregarDadosOnline().then(function(carregou) {
       if (carregou) {
-        renderOverview();
+        rebuildSummaries();
+        atualizarFiltroObras();
+        atualizarSelectsTorres();
+        refresh();
         updateSidebarFooter();
       }
     });
